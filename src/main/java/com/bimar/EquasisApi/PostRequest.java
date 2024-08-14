@@ -5,7 +5,6 @@ public class PostRequest {
     private String field1;
     private String field2;
 
-    // Getters and setters
     public String getField1() {
         return field1;
     }

@@ -12,10 +12,8 @@ public class AppConfig {
     @Bean
     public RestTemplate restTemplate() {
         RestTemplate restTemplate = new RestTemplate();
-
-        // Add converters to handle different types of content
-        restTemplate.getMessageConverters().add(new FormHttpMessageConverter()); // For handling form submissions
-        restTemplate.getMessageConverters().add(new StringHttpMessageConverter()); // For handling plain text responses
+        restTemplate.getMessageConverters().add(new FormHttpMessageConverter()); 
+        restTemplate.getMessageConverters().add(new StringHttpMessageConverter()); 
 
         return restTemplate;
     }

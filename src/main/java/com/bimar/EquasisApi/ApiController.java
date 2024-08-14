@@ -14,9 +14,15 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -87,9 +93,9 @@ public class ApiController {
         ResponseEntity<String> response;
         try {
             response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
-            parseCompanyInfoAndWriteToCsv(response.getBody());
+           
             parseHtmlAndWriteToCsv(response.getBody());
-            simulateClickAndGetDetails(response.getBody());  // New method to simulate the click and get detailed info
+            simulateClickAndGetDetails(response.getBody());  
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -124,7 +130,7 @@ public class ApiController {
         ResponseEntity<String> response;
         try {
             response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
-            parseHtmlAndWriteToCsv(response.getBody());
+            parseCompanyDetailsAndWriteToCsv(response.getBody());
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -152,13 +158,24 @@ public class ApiController {
     }
 
     private void parseHtmlAndWriteToCsv(String html) {
+        Set<String> existingRecords = loadExistingRecords("Equasis_ships.csv");
+        Set<String> existingNames = new HashSet<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("ships.csv"))) {
-            writer.println("IMO number,Name of ship,Gross tonnage,Type of ship,Year of build,Flag");
+        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_ships.csv", true))) {
+            File csvFile = new File("Equasis_ships.csv");
+            if (csvFile.length() == 0) {
+                writer.println("IMO Number,Name of Ship,Gross Tonnage,Type of Ship,Year of Build,Flag");
+            }
+
+            boolean skipRow = false; 
 
             for (Element row : rows) {
+                if (skipRow) {
+                    skipRow = false; 
+                    continue; 
+                }
                 String imoNumber = row.select("th").text().trim();
                 Elements dataCells = row.select("td");
 
@@ -168,35 +185,127 @@ public class ApiController {
                 String yearOfBuild = dataCells.size() > 3 ? dataCells.get(3).text().trim() : "";
                 String flag = dataCells.size() > 4 ? dataCells.get(4).text().trim() : "";
 
-                writer.printf("%s,%s,%s,%s,%s,%s%n", imoNumber, nameOfShip, grossTonnage, typeOfShip, yearOfBuild, flag);
+                String record = String.format("%s,%s,%s,%s,%s,%s", imoNumber, nameOfShip, grossTonnage, typeOfShip, yearOfBuild, flag);
+                String uniqueKey = imoNumber + nameOfShip;
+                if (!existingRecords.contains(record) && !existingNames.contains(uniqueKey)) {
+                    writer.println(record);
+                    existingRecords.add(record);
+                    existingNames.add(uniqueKey);
+                }
+
+                skipRow = true; 
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void parseCompanyInfoAndWriteToCsv(String html) {
+    private void parseCompanyDetailsAndWriteToCsv(String html) {
+        Set<String> existingRecords = loadExistingRecords("Equasis_companySearch.csv"); 
+        Set<String> existingNames = new HashSet<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("company_info.csv"))) {
-            writer.println("IMO number,Company name,Date of effect");
+        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_companySearch.csv", true))) {
+            File csvFile = new File("Equasis_companySearch.csv");
+            if (csvFile.length() == 0) {
+                writer.println("Company Number,Company Name,Address");
+            }
+
+            boolean skipRow = false; 
 
             for (Element row : rows) {
-                Elements cells = row.select("td");
+                if (skipRow) {
+                    skipRow = false; 
+                    continue; 
+                }
 
-                String imoNumber = cells.size() > 0 ? cells.get(0).text().trim() : "";
-                String companyName = cells.size() > 2 ? cells.get(2).text().trim() : "";
-                String dateOfEffect = cells.size() > 4 ? cells.get(4).text().trim() : "";
+                Elements headerCells = row.select("th");
+                Elements dataCells = row.select("td");
 
-                writer.printf("%s,%s,%s%n", imoNumber, companyName, dateOfEffect);
+                String record;
+                String companyName;
+                if (!headerCells.isEmpty()) {
+                    String companyNumber = headerCells.size() > 0 ? headerCells.get(0).text().trim() : "";
+                    companyName = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
+                    String address = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
+                    address = address.replace(",", ";"); 
+
+                    record = String.format("%s,%s,%s", companyNumber, companyName, address);
+                } else if (!dataCells.isEmpty()) {
+                    String companyNumber = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
+                    companyName = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
+                    String address = dataCells.size() > 2 ? dataCells.get(2).text().trim() : "";
+                    address = address.replace(",", ";"); 
+
+                    record = String.format("%s,%s,%s", companyNumber, companyName, address);
+                } else {
+                    continue; 
+                }
+                String uniqueKey = companyName;
+                if (!existingRecords.contains(record) && !existingNames.contains(uniqueKey)) {
+                    writer.println(record);
+                    existingRecords.add(record);
+                    existingNames.add(uniqueKey);
+                }
+
+                skipRow = true; 
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
+    
+    private void parseIMOInfoAndWriteToCsv(String html) {
+        Set<String> existingRecords = loadExistingRecords("Equasis_IMOinfo.csv");
+        Set<String> existingNames = new HashSet<>();
+        Document doc = Jsoup.parse(html);
+        Elements rows = doc.select("table.table-striped tbody tr");
 
-    // New methods to simulate click and get detailed information
+        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_IMOinfo.csv", true))) {
+            File csvFile = new File("Equasis_IMOinfo.csv");
+            if (csvFile.length() == 0) {
+                writer.println("IMO Number,Company Name,Date of Effect");
+            }
+
+            for (Element row : rows) {
+                Elements cells = row.select("td");
+                String imoNumber = cells.size() > 0 ? cells.get(0).text().trim() : "";
+                if (imoNumber.isEmpty() || !imoNumber.matches("\\d{7}")) {
+                    continue;
+                }
+
+                String companyName = cells.size() > 2 ? cells.get(2).text().trim() : "";
+                String dateOfEffect = cells.size() > 4 ? cells.get(4).text().trim() : "";
+
+                String record = String.format("%s,%s,%s", imoNumber, companyName, dateOfEffect);
+
+                if (!existingRecords.contains(record) && !existingNames.contains(companyName)) {
+                    writer.println(record);
+                    existingRecords.add(record);
+                    existingNames.add(companyName);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+    
+    private Set<String> loadExistingRecords(String fileName) {
+        Set<String> records = new HashSet<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(fileName))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                records.add(line.trim());
+            }
+        } catch (IOException e) {
+            if (!(e instanceof FileNotFoundException)) {
+                e.printStackTrace();
+            }
+        }
+        return records;
+    }
+
 
     private void simulateClickAndGetDetails(String html) {
         Document doc = Jsoup.parse(html);
@@ -204,11 +313,7 @@ public class ApiController {
 
         for (Element link : links) {
             String onclick = link.attr("onclick");
-
-            // Extract IMO number from onclick attribute
             String imoNumber = extractImoFromOnclick(onclick);
-
-            // Now simulate clicking by submitting the form with the IMO number
             if (imoNumber != null) {
                 submitFormWithImo(imoNumber);
             }
@@ -216,12 +321,11 @@ public class ApiController {
     }
 
     private String extractImoFromOnclick(String onclick) {
-        // This is a simple regex to extract IMO number from onclick attribute
-        Pattern pattern = Pattern.compile("\\d{7}"); // IMO number is typically 7 digits
+        Pattern pattern = Pattern.compile("\\d{7}"); 
         Matcher matcher = pattern.matcher(onclick);
 
         if (matcher.find()) {
-            return matcher.group(0); // Return the first match
+            return matcher.group(0); 
         }
         return null;
     }
@@ -242,29 +346,8 @@ public class ApiController {
         ResponseEntity<String> response;
         try {
             response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
-            parseAndWriteDetailedInfo(response.getBody());
+            parseIMOInfoAndWriteToCsv(response.getBody());
         } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void parseAndWriteDetailedInfo(String html) {
-    	Document doc = Jsoup.parse(html);
-        Elements rows = doc.select("table.table-striped tbody tr");
- 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("company_info.csv"))) {
-            writer.println("IMO number,Company name,Date of effect");
- 
-            for (Element row : rows) {
-                Elements cells = row.select("td");
- 
-                String imoNumber = cells.size() > 0 ? cells.get(0).text().trim() : "";
-                String companyName = cells.size() > 2 ? cells.get(2).text().trim() : "";
-                String dateOfEffect = cells.size() > 4 ? cells.get(4).text().trim() : "";
- 
-                writer.printf("%s,%s,%s%n", imoNumber, companyName, dateOfEffect);
-            }
-        } catch (IOException e) {
             e.printStackTrace();
         }
     }

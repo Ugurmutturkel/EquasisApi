@@ -3,7 +3,6 @@ package com.bimar.EquasisApi;
 public class SearchRequest {
     private String searchInput;
 
-    // Getters and setters
     public String getSearchInput() {
         return searchInput;
     }
