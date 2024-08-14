@@ -14,15 +14,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,19 +54,19 @@ public class ApiController {
         sessionService.setJsessionid(jsessionid);
 
         if (jsessionid != null) {
-            return ResponseEntity.ok("JSESSIONID: " + jsessionid);
+            return ResponseEntity.ok("{\"JSESSIONID\":\"" + jsessionid + "\"}");
         } else {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                                 .body("JSESSIONID not found in the response.");
+                                 .body("{\"error\":\"JSESSIONID not found in the response.\"}");
         }
     }
 
     @PostMapping("/searchimo")
-    public ResponseEntity<String> performSearch(@RequestBody SearchRequest searchRequest) {
+    public ResponseEntity<Map<String, Object>> performSearch(@RequestBody SearchRequest searchRequest) {
         String jsessionid = sessionService.getJsessionid();
         if (jsessionid == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                                 .body("JSESSIONID is missing. Please log in first.");
+                                 .body(Collections.singletonMap("error", "JSESSIONID is missing. Please log in first."));
         }
 
         String url = "https://www.equasis.org/EquasisWeb/restricted/Search?fs=HomePage";
@@ -87,30 +79,38 @@ public class ApiController {
                              "&P_ENTREE_HOME=" + searchRequest.getSearchInput() +
                              "&P_ENTREE_HOME_HIDDEN=" + searchRequest.getSearchInput() +
                              "&checkbox-ship=Ship&advancedSearch=";
-                             
+
         HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
 
-        ResponseEntity<String> response;
         try {
-            response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
-           
-            parseHtmlAndWriteToCsv(response.getBody());
-            simulateClickAndGetDetails(response.getBody());  
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
+
+            // Parse HTML to JSON
+            Map<String, Object> htmlJson = parseHtmlToJson(response.getBody());
+            
+            // Extract additional IMO details directly
+            Map<String, Object> imoDetails = extractIMODetails(response.getBody(), jsessionid);
+            
+            // Combine both JSON responses
+            Map<String, Object> combinedJson = new HashMap<>();
+            combinedJson.put("searchResults", htmlJson);
+            combinedJson.put("imoDetails", imoDetails);
+
+            return ResponseEntity.ok(combinedJson);
+
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                                 .body("Failed to perform search: " + e.getMessage());
+                                 .body(Collections.singletonMap("error", "Failed to perform search: " + e.getMessage()));
         }
-
-        return ResponseEntity.ok(response.getBody());
     }
 
     @PostMapping("/searchcompany")
-    public ResponseEntity<String> performSearchComp(@RequestBody SearchRequest searchRequest) {
+    public ResponseEntity<Map<String, Object>> performSearchComp(@RequestBody SearchRequest searchRequest) {
         String jsessionid = sessionService.getJsessionid();
         if (jsessionid == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                                 .body("JSESSIONID is missing. Please log in first.");
+                                 .body(Collections.singletonMap("error", "JSESSIONID is missing. Please log in first."));
         }
 
         String url = "https://www.equasis.org/EquasisWeb/restricted/Search?fs=HomePage";
@@ -123,21 +123,19 @@ public class ApiController {
                              "&P_ENTREE_HOME=" + searchRequest.getSearchInput() +
                              "&P_ENTREE_HOME_HIDDEN=" + searchRequest.getSearchInput() +
                              "&checkbox-companySearch=Company" +
-                             "&advancedSearch=";  
+                             "&advancedSearch=";
 
         HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
 
         ResponseEntity<String> response;
         try {
             response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
-            parseCompanyDetailsAndWriteToCsv(response.getBody());
+            return ResponseEntity.ok(parseCompanyDetailsToJson(response.getBody()));
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                                 .body("Failed to perform search: " + e.getMessage());
+                                 .body(Collections.singletonMap("error", "Failed to perform search: " + e.getMessage()));
         }
-
-        return ResponseEntity.ok(response.getBody());
     }
 
     private String extractJSessionId(HttpHeaders headers) {
@@ -157,198 +155,150 @@ public class ApiController {
         return jsessionid;
     }
 
-    private void parseHtmlAndWriteToCsv(String html) {
-        Set<String> existingRecords = loadExistingRecords("Equasis_ships.csv");
-        Set<String> existingNames = new HashSet<>();
+    private Map<String, Object> parseHtmlToJson(String html) {
+        Set<String> existingRecords = new HashSet<>();
+        List<Map<String, String>> shipList = new ArrayList<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_ships.csv", true))) {
-            File csvFile = new File("Equasis_ships.csv");
-            if (csvFile.length() == 0) {
-                writer.println("IMO Number,Name of Ship,Gross Tonnage,Type of Ship,Year of Build,Flag");
-            }
+        for (Element row : rows) {
+            String imoNumber = row.select("th").text().trim();
+            Elements dataCells = row.select("td");
 
-            boolean skipRow = false; 
+            String nameOfShip = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
+            String grossTonnage = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
+            String typeOfShip = dataCells.size() > 2 ? dataCells.get(2).text().trim() : "";
+            String yearOfBuild = dataCells.size() > 3 ? dataCells.get(3).text().trim() : "";
+            String flag = dataCells.size() > 4 ? dataCells.get(4).text().trim() : "";
 
-            for (Element row : rows) {
-                if (skipRow) {
-                    skipRow = false; 
-                    continue; 
-                }
-                String imoNumber = row.select("th").text().trim();
-                Elements dataCells = row.select("td");
-
-                String nameOfShip = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
-                String grossTonnage = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
-                String typeOfShip = dataCells.size() > 2 ? dataCells.get(2).text().trim() : "";
-                String yearOfBuild = dataCells.size() > 3 ? dataCells.get(3).text().trim() : "";
-                String flag = dataCells.size() > 4 ? dataCells.get(4).text().trim() : "";
+            if (!imoNumber.isEmpty()) {
+                Map<String, String> shipData = new HashMap<>();
+                shipData.put("IMO Number", imoNumber);
+                shipData.put("Name of Ship", nameOfShip);
+                shipData.put("Gross Tonnage", grossTonnage);
+                shipData.put("Type of Ship", typeOfShip);
+                shipData.put("Year of Build", yearOfBuild);
+                shipData.put("Flag", flag);
 
                 String record = String.format("%s,%s,%s,%s,%s,%s", imoNumber, nameOfShip, grossTonnage, typeOfShip, yearOfBuild, flag);
-                String uniqueKey = imoNumber + nameOfShip;
-                if (!existingRecords.contains(record) && !existingNames.contains(uniqueKey)) {
-                    writer.println(record);
+                if (!existingRecords.contains(record)) {
+                    shipList.add(shipData);
                     existingRecords.add(record);
-                    existingNames.add(uniqueKey);
                 }
-
-                skipRow = true; 
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
+
+        return Collections.singletonMap("ships", shipList);
     }
 
-    private void parseCompanyDetailsAndWriteToCsv(String html) {
-        Set<String> existingRecords = loadExistingRecords("Equasis_companySearch.csv"); 
-        Set<String> existingNames = new HashSet<>();
+    private Map<String, Object> parseCompanyDetailsToJson(String html) {
+        Set<String> existingRecords = new HashSet<>();
+        List<Map<String, String>> companyList = new ArrayList<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_companySearch.csv", true))) {
-            File csvFile = new File("Equasis_companySearch.csv");
-            if (csvFile.length() == 0) {
-                writer.println("Company Number,Company Name,Address");
-            }
+        for (Element row : rows) {
+            Elements headerCells = row.select("th");
+            Elements dataCells = row.select("td");
 
-            boolean skipRow = false; 
+            String companyNumber = headerCells.size() > 0 ? headerCells.get(0).text().trim() : "";
+            String companyName = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
+            String address = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
+            address = address.replace(",", ";");
 
-            for (Element row : rows) {
-                if (skipRow) {
-                    skipRow = false; 
-                    continue; 
-                }
+            if (!companyNumber.isEmpty() && !companyName.isEmpty()) {
+                Map<String, String> companyData = new HashMap<>();
+                companyData.put("Company Number", companyNumber);
+                companyData.put("Company Name", companyName);
+                companyData.put("Address", address);
 
-                Elements headerCells = row.select("th");
-                Elements dataCells = row.select("td");
-
-                String record;
-                String companyName;
-                if (!headerCells.isEmpty()) {
-                    String companyNumber = headerCells.size() > 0 ? headerCells.get(0).text().trim() : "";
-                    companyName = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
-                    String address = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
-                    address = address.replace(",", ";"); 
-
-                    record = String.format("%s,%s,%s", companyNumber, companyName, address);
-                } else if (!dataCells.isEmpty()) {
-                    String companyNumber = dataCells.size() > 0 ? dataCells.get(0).text().trim() : "";
-                    companyName = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
-                    String address = dataCells.size() > 2 ? dataCells.get(2).text().trim() : "";
-                    address = address.replace(",", ";"); 
-
-                    record = String.format("%s,%s,%s", companyNumber, companyName, address);
-                } else {
-                    continue; 
-                }
-                String uniqueKey = companyName;
-                if (!existingRecords.contains(record) && !existingNames.contains(uniqueKey)) {
-                    writer.println(record);
+                String record = String.format("%s,%s,%s", companyNumber, companyName, address);
+                if (!existingRecords.contains(record)) {
+                    companyList.add(companyData);
                     existingRecords.add(record);
-                    existingNames.add(uniqueKey);
                 }
-
-                skipRow = true; 
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
+
+        return Collections.singletonMap("companies", companyList);
     }
-    
-    private void parseIMOInfoAndWriteToCsv(String html) {
-        Set<String> existingRecords = loadExistingRecords("Equasis_IMOinfo.csv");
-        Set<String> existingNames = new HashSet<>();
+    private Map<String, Object> extractIMODetails(String html, String jsessionid) {
+        List<Map<String, String>> imoDetailsList = new ArrayList<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter("Equasis_IMOinfo.csv", true))) {
-            File csvFile = new File("Equasis_IMOinfo.csv");
-            if (csvFile.length() == 0) {
-                writer.println("IMO Number,Company Name,Date of Effect");
-            }
+        for (Element row : rows) {
+            String imoNumber = row.select("th").text().trim();
+            Elements dataCells = row.select("td");
 
-            for (Element row : rows) {
-                Elements cells = row.select("td");
-                String imoNumber = cells.size() > 0 ? cells.get(0).text().trim() : "";
-                if (imoNumber.isEmpty() || !imoNumber.matches("\\d{7}")) {
-                    continue;
+            String nameOfCompany = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
+            String dateOfEffect = dataCells.size() > 4 ? dataCells.get(4).text().trim() : "";
+
+            // Extract the IMO number from the onclick attribute
+            Element detailsLink = row.select("td:last-child a[style='cursor: pointer']").first();
+            if (detailsLink != null) {
+                String onclickValue = detailsLink.attr("onclick");
+                String extractedImoNumber = extractIMONumberFromOnclick(onclickValue);
+
+                // Simulate the form submission to get detailed info
+                Map<String, String> detailedInfo = getDetailedIMOInfo(extractedImoNumber, jsessionid);
+                
+
+                if (!imoNumber.isEmpty()) {
+                    Map<String, String> imoDetail = new HashMap<>();
+                    imoDetail.put("IMO Number", imoNumber);
+                    imoDetail.put("Name of Company", nameOfCompany);
+                    imoDetail.put("Date of Effect", dateOfEffect);
+                    if (detailedInfo != null) {
+                        imoDetail.putAll(detailedInfo);
+                    }
+
+                    imoDetailsList.add(imoDetail);
                 }
-
-                String companyName = cells.size() > 2 ? cells.get(2).text().trim() : "";
-                String dateOfEffect = cells.size() > 4 ? cells.get(4).text().trim() : "";
-
-                String record = String.format("%s,%s,%s", imoNumber, companyName, dateOfEffect);
-
-                if (!existingRecords.contains(record) && !existingNames.contains(companyName)) {
-                    writer.println(record);
-                    existingRecords.add(record);
-                    existingNames.add(companyName);
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-    
-    private Set<String> loadExistingRecords(String fileName) {
-        Set<String> records = new HashSet<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader(fileName))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                records.add(line.trim());
-            }
-        } catch (IOException e) {
-            if (!(e instanceof FileNotFoundException)) {
-                e.printStackTrace();
             }
         }
-        return records;
+
+
+        return Collections.singletonMap("IMO Details", imoDetailsList);
     }
 
-
-    private void simulateClickAndGetDetails(String html) {
-        Document doc = Jsoup.parse(html);
-        Elements links = doc.select("a[onclick]");
-
-        for (Element link : links) {
-            String onclick = link.attr("onclick");
-            String imoNumber = extractImoFromOnclick(onclick);
-            if (imoNumber != null) {
-                submitFormWithImo(imoNumber);
-            }
-        }
-    }
-
-    private String extractImoFromOnclick(String onclick) {
-        Pattern pattern = Pattern.compile("\\d{7}"); 
-        Matcher matcher = pattern.matcher(onclick);
-
+    private String extractIMONumberFromOnclick(String onclickValue) {
+        Pattern pattern = Pattern.compile("document\\.formShip\\.P_IMO\\.value='(\\d+)';");
+        Matcher matcher = pattern.matcher(onclickValue);
         if (matcher.find()) {
-            return matcher.group(0); 
+            return matcher.group(1);
         }
         return null;
     }
 
-    private void submitFormWithImo(String imoNumber) {
-        String jsessionid = sessionService.getJsessionid();
-        if (jsessionid == null) {
-            throw new IllegalStateException("JSESSIONID is missing. Please log in first.");
-        }
+    private Map<String, String> getDetailedIMOInfo(String imoNumber, String jsessionid) {
+        Map<String, String> detailedInfo = new HashMap<>();
 
-        String url = "https://www.equasis.org/EquasisWeb/restricted/ShipInfo?fs=HomePage&P_IMO=" + imoNumber;
+        String detailsUrl = "https://www.equasis.org/EquasisWeb/restricted/Details";
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.add(HttpHeaders.COOKIE, "JSESSIONID=" + jsessionid);
-
-        HttpEntity<String> request = new HttpEntity<>(headers);
-
-        ResponseEntity<String> response;
         try {
-            response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
-            parseIMOInfoAndWriteToCsv(response.getBody());
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            headers.add(HttpHeaders.COOKIE, "JSESSIONID=" + jsessionid);
+
+            String requestBody = "P_IMO=" + imoNumber;
+
+            HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
+
+            ResponseEntity<String> response = restTemplate.exchange(detailsUrl, HttpMethod.POST, request, String.class);
+
+            Document doc = Jsoup.parse(response.getBody());
+            // Assuming specific elements or patterns to extract detailed information
+            Element detailedInfoElement = doc.selectFirst(".detailed-info-selector");
+            if (detailedInfoElement != null) {
+                detailedInfo.put("Detailed Info", detailedInfoElement.text().trim());
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
         }
+
+        return detailedInfo;
     }
+
 }
