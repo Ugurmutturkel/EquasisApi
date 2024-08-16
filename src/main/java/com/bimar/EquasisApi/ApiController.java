@@ -85,18 +85,13 @@ public class ApiController {
         try {
             ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
 
-            // Parse HTML to JSON
-            Map<String, Object> htmlJson = parseHtmlToJson(response.getBody());
-            
-            // Extract additional IMO details directly
-            Map<String, Object> imoDetails = extractIMODetails(response.getBody(), jsessionid);
-            
-            // Combine both JSON responses
-            Map<String, Object> combinedJson = new HashMap<>();
-            combinedJson.put("searchResults", htmlJson);
-            combinedJson.put("imoDetails", imoDetails);
+            // Extract and integrate IMO details
+            List<String> imoDetails = simulateClickAndGetDetails(response.getBody());
 
-            return ResponseEntity.ok(combinedJson);
+            // Parse HTML and integrate IMO details
+            Map<String, Object> htmlJson = parseHtmlToJson(response.getBody(), imoDetails);
+
+            return ResponseEntity.ok(htmlJson);
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -155,11 +150,23 @@ public class ApiController {
         return jsessionid;
     }
 
-    private Map<String, Object> parseHtmlToJson(String html) {
-        Set<String> existingRecords = new HashSet<>();
+    private Map<String, Object> parseHtmlToJson(String html, List<String> imoDetails) {
+        Set<String> existingRecords = new LinkedHashSet<>();
         List<Map<String, String>> shipList = new ArrayList<>();
         Document doc = Jsoup.parse(html);
         Elements rows = doc.select("table.table-striped tbody tr");
+
+        // Parse IMO details into a list of maps
+        List<Map<String, String>> imoDetailsList = new ArrayList<>();
+        for (int i = 0; i < imoDetails.size(); i += 3) {
+            if (i + 2 < imoDetails.size()) { // Ensure there are at least 3 elements left
+                Map<String, String> imoDetailsMap = new LinkedHashMap<>();
+                imoDetailsMap.put("IMO Number", imoDetails.get(i));
+                imoDetailsMap.put("Company Name", imoDetails.get(i + 1));
+                imoDetailsMap.put("Date of Effect", imoDetails.get(i + 2));
+                imoDetailsList.add(imoDetailsMap);
+            }
+        }
 
         for (Element row : rows) {
             String imoNumber = row.select("th").text().trim();
@@ -188,7 +195,11 @@ public class ApiController {
             }
         }
 
-        return Collections.singletonMap("ships", shipList);
+        Map<String, Object> result = new HashMap<>();
+        result.put("imoDetails", imoDetailsList); 
+        result.put("ships", shipList); 
+
+        return result;
     }
 
     private Map<String, Object> parseCompanyDetailsToJson(String html) {
@@ -222,83 +233,90 @@ public class ApiController {
 
         return Collections.singletonMap("companies", companyList);
     }
-    private Map<String, Object> extractIMODetails(String html, String jsessionid) {
-        List<Map<String, String>> imoDetailsList = new ArrayList<>();
+    
+    public List<String> simulateClickAndGetDetails(String html) {
         Document doc = Jsoup.parse(html);
-        Elements rows = doc.select("table.table-striped tbody tr");
+        Elements links = doc.select("a[onclick]");
 
-        for (Element row : rows) {
-            String imoNumber = row.select("th").text().trim();
-            Elements dataCells = row.select("td");
-
-            String nameOfCompany = dataCells.size() > 1 ? dataCells.get(1).text().trim() : "";
-            String dateOfEffect = dataCells.size() > 4 ? dataCells.get(4).text().trim() : "";
-
-            // Extract the IMO number from the onclick attribute
-            Element detailsLink = row.select("td:last-child a[style='cursor: pointer']").first();
-            if (detailsLink != null) {
-                String onclickValue = detailsLink.attr("onclick");
-                String extractedImoNumber = extractIMONumberFromOnclick(onclickValue);
-
-                // Simulate the form submission to get detailed info
-                Map<String, String> detailedInfo = getDetailedIMOInfo(extractedImoNumber, jsessionid);
-                
-
-                if (!imoNumber.isEmpty()) {
-                    Map<String, String> imoDetail = new HashMap<>();
-                    imoDetail.put("IMO Number", imoNumber);
-                    imoDetail.put("Name of Company", nameOfCompany);
-                    imoDetail.put("Date of Effect", dateOfEffect);
-                    if (detailedInfo != null) {
-                        imoDetail.putAll(detailedInfo);
-                    }
-
-                    imoDetailsList.add(imoDetail);
+        Set<String> allImoDetails = new LinkedHashSet<>(); 
+        
+        for (Element link : links) {
+            String onclick = link.attr("onclick");
+            String imoNumber = extractImoFromOnclick(onclick);
+            if (imoNumber != null) {
+                List<String> imoDetails = submitFormWithImo(imoNumber);
+                if (imoDetails != null && !imoDetails.isEmpty()) {
+                    allImoDetails.addAll(imoDetails);
                 }
             }
         }
-
-
-        return Collections.singletonMap("IMO Details", imoDetailsList);
+        return new ArrayList<>(allImoDetails); 
     }
 
-    private String extractIMONumberFromOnclick(String onclickValue) {
-        Pattern pattern = Pattern.compile("document\\.formShip\\.P_IMO\\.value='(\\d+)';");
-        Matcher matcher = pattern.matcher(onclickValue);
+    private String extractImoFromOnclick(String onclick) {
+        Pattern pattern = Pattern.compile("\\d{7}"); 
+        Matcher matcher = pattern.matcher(onclick);
+
         if (matcher.find()) {
-            return matcher.group(1);
+            return matcher.group(0); 
         }
         return null;
     }
 
-    private Map<String, String> getDetailedIMOInfo(String imoNumber, String jsessionid) {
-        Map<String, String> detailedInfo = new HashMap<>();
+    private List<String> submitFormWithImo(String imoNumber) {
+        String jsessionid = sessionService.getJsessionid();
+        if (jsessionid == null) {
+            throw new IllegalStateException("JSESSIONID is missing. Please log in first.");
+        }
 
-        String detailsUrl = "https://www.equasis.org/EquasisWeb/restricted/Details";
+        String url = "https://www.equasis.org/EquasisWeb/restricted/ShipInfo?fs=HomePage&P_IMO=" + imoNumber;
 
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.COOKIE, "JSESSIONID=" + jsessionid);
+
+        HttpEntity<String> request = new HttpEntity<>(headers);
+
+        ResponseEntity<String> response;
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            headers.add(HttpHeaders.COOKIE, "JSESSIONID=" + jsessionid);
-
-            String requestBody = "P_IMO=" + imoNumber;
-
-            HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
-
-            ResponseEntity<String> response = restTemplate.exchange(detailsUrl, HttpMethod.POST, request, String.class);
-
-            Document doc = Jsoup.parse(response.getBody());
-            // Assuming specific elements or patterns to extract detailed information
-            Element detailedInfoElement = doc.selectFirst(".detailed-info-selector");
-            if (detailedInfoElement != null) {
-                detailedInfo.put("Detailed Info", detailedInfoElement.text().trim());
-            }
-
+            response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+            return parseIMO(response.getBody());
         } catch (Exception e) {
             e.printStackTrace();
         }
-
-        return detailedInfo;
+        return Collections.emptyList();
     }
 
+    public List<String> parseIMO(String html) {
+        Document doc = Jsoup.parse(html);
+        Elements rows = doc.select("table.table-striped tbody tr");
+
+        Map<String, List<String>> imoMap = new LinkedHashMap<>();
+
+        for (Element row : rows) {
+            Elements cells = row.select("td");
+            String imoNumber = cells.size() > 0 ? cells.get(0).text().trim() : "";
+
+            if (imoNumber.isEmpty() || !imoNumber.matches("\\d{7}")) {
+                continue;
+            }
+            if (imoMap.containsKey(imoNumber)) {
+                continue;
+            }
+
+            String companyName = cells.size() > 2 ? cells.get(2).text().trim() : "";
+            String dateOfEffect = cells.size() > 4 ? cells.get(4).text().trim() : "";
+            	
+            List<String> details = new ArrayList<>();
+            details.add(companyName);
+            details.add(dateOfEffect);
+            imoMap.put(imoNumber, details);
+        }
+        List<String> imoInfoList = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : imoMap.entrySet()) {
+            imoInfoList.add(entry.getKey());
+            imoInfoList.addAll(entry.getValue());
+        }
+
+        return imoInfoList;
+    }
 }
